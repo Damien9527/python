@@ -1,0 +1,299 @@
+﻿1、机器：
+10.39.3.22-26、10.39.3.28
+
+
+
+2.优化
+  tcp参数优化 
+   
+  ntp时间同步配置
+
+  requiretty准备
+	执行命令visudo修改suoders文件：
+	1. 注释Defaults requiretty
+	Defaults requiretty修改为 #Defaults requiretty， 表示不需要控制终端。
+	否则会出现sudo: sorry, you must have a tty to run sudo
+	2. 增加行 Defaults visiblepw
+	否则会出现 sudo: no tty present and no askpass program specified
+ 
+
+
+3、ceph用户添加
+
+adduser  ceph -u 2000  
+#必须要添加密码，否则无法配置ssh互信
+(echo "123321";sleep 1;echo "123321")|passwd ceph --stdin
+增加sudo权限
+echo  "ceph ALL = (root) NOPASSWD:ALL"| sudo tee /etc/sudoers.d/ceph
+chmod 0440 /etc/sudoers.d/ceph  
+
+
+ 
+4、修改主机名：
+hostnamectl  set-hostname cephnode0
+hostnamectl  set-hostname cephnode1
+hostnamectl  set-hostname cephnode2
+将主机名添加到/etc/hosts文件中
+
+
+
+5、 生成密钥文件，默认回车即可
+ssh-keygen -t rsa
+
+cat .ssh/id_rsa.pub .ssh/authorized_keys
+
+如果希望ssh公钥生效需满足至少下面两个条件：
+　　　　　1) .ssh目录的权限必须是700 
+　　　　　2) .ssh/authorized_keys文件权限必须是600
+
+rsync   10.39.5.117::PSO/xiewei/log/authorized_keys .ssh/authorized_keys
+chmod 600 .ssh/authorized_keys
+sudo chattr +i .ssh/authorized_keys
+
+6、部署ssh，由于公司默认的ssh不能用，故自己编译安装。
+rsync  10.39.5.117::PSO/xiewei/openssh* .
+sh  openssh7.4_install.sh
+
+#################################################
+#wget http://ftp4.usa.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-7.4p1.tar.gz
+#( python -m SimpleHTTPServer 8888 ,wget 10.39.1.41:8888/openssh-7.4p1.tar.gz)
+
+rsync -avP 10.39.5.117::PSO/xiewei/openssh-7.4p1.tar.gz  /usr/src
+
+
+cd /usr/src
+tar -zxvf /usr/src/openssh-7.4p1.tar.gz
+cd openssh-7.4p1
+./configure --prefix=/usr/local/openssh7.4 --sysconfdir=/usr/local/openssh7.4/etc/ssh --with-pam --with-zlib --with-md5-passwords
+make && make install 
+sed -i 's/#Port 22/Port 12580/g'    /usr/local/openssh7.4/etc/ssh/sshd_config
+/usr/local/openssh7.4/sbin/sshd
+
+ 修改客户端默认登录ssh使用的端口为12580
+ echo "Port 12580" >> /usr/local/etc/ssh_config
+####################################################
+
+
+
+
+
+7、为admin-node节点安装ceph-deploy
+
+第一步：增加 yum配置文件
+yum clean all
+
+wget -O /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-7.repo
+wget -O /etc/yum.repos.d/epel.repo http://mirrors.aliyun.com/repo/epel-7.repo
+
+sed -i '/aliyuncs/d' /etc/yum.repos.d/CentOS-Base.repo
+sed -i '/aliyuncs/d' /etc/yum.repos.d/epel.repo
+sed -i 's/$releasever/7.2.1511/g' /etc/yum.repos.d/CentOS-Base.repo
+
+添加163源：
+vim /etc/yum.repos.d/ceph.repo
+[ceph]
+name=ceph
+baseurl=http://mirrors.163.com/ceph/rpm-jewel/el7/x86_64/
+gpgcheck=0
+[ceph-noarch]
+name=cephnoarch
+baseurl=http://mirrors.163.com/ceph/rpm-jewel/el7/noarch/
+gpgcheck=0
+
+
+进行yum的makecache
+yum makecache
+
+
+开启代理上网：(需要在ceph用户下配置)
+echo "export http_proxy='http://10.39.0.106:8080'">>/etc/profile
+echo "export https_proxy='http://10.39.0.106:8080'">>/etc/profile
+source  /etc/profile
+第二步：更新软件源并安装ceph-deploy
+
+sudo yum update && sudo yum install ceph-deploy
+
+
+#######################################(备用)
+6、使用国内ceph源：（每个节点需要部署 epel.repo,否则会出现依赖错误）
+CentOS:
+export CEPH_DEPLOY_REPO_URL=http://mirrors.163.com/ceph/rpm-jewel/el7
+export CEPH_DEPLOY_GPG_URL=http://mirrors.163.com/ceph/keys/release.asc
+####################################
+ 
+
+ 
+ 
+ 
+ 
+
+开始节点安装：
+
+第一步：创建集群设置Monitor节点
+在admin节点上用ceph-deploy创建集群，new后面跟的是monitor节点的hostname，如果有多个monitor，则它们的hostname以为间隔，多个mon节点可以实现互备。
+ceph-deploy  new cephnode0 cephnode1 cephnode2
+
+
+第二步：利用ceph-deploy为节点安装ceph
+ceph-deploy install  cephnode0  cephnode1 cephnode2
+	(未能成功安装)
+	
+	
+  手动安装方法：
+	在每个节点单独运行安装ceph软件：yum install ceph -y  
+	osd节点： yum install ceph-radosgw -y
+	
+ 初始化monitor节点
+初始化监控节点并收集keyring：
+ceph-deploy mon create-initial 
+ (可添加--overwrite-conf参数)
+ceph-deploy admin cephnode0 cephnode0 cephnode1 cephnode2
+sudo chmod 755 /etc/ceph/ceph.client.admin.keyring
+ 
+
+
+ 第三步: osd部署
+ 
+ceph-deploy osd prepare cephnode0:/data11/ceph-osd  cephnode2:/data11/ceph-osd   cephnode3:/data11/ceph-osd   cephnode4:/data11/ceph-osd   cephnode5:/data11/ceph-osd 
+ceph-deploy osd activate cephnode0:/data11/ceph-osd  cephnode2:/data11/ceph-osd   cephnode3:/data11/ceph-osd   cephnode4:/data11/ceph-osd   cephnode5:/data11/ceph-osd 
+
+(此处直接挂载的目录，由于分区默认使用的ext4格式，osd日志中会有报错,在ceph.conf文件中添加指定参数解决)
+
+
+
+添加一个元数据服务器
+ceph-deploy mds create cephnode2 cephnode3
+
+
+创建ceph pg：
+
+ceph osd pool create cephfs_data 1000
+ceph osd pool create cephfs_metadata 1000
+ 
+ ceph -s
+ ceph fs new cephfs cephfs_metadata cephfs_data
+
+
+创建完成后，就可以使用ceph-fuse挂载了。
+sudo ceph-fuse /mnt/ceph-file/
+
+
+ 
+ceph daseboard：
+wget https://github.com/Crapworks/ceph-dash/archive/master.zip
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+#osd节点移除
+1、ceph osd out osd.0 osd.1
+2、停止osd节点进程  sudo systemctl status  ceph-osd@0.service
+3、ceph osd crush remove osd.0
+4、 ceph auth del osd.0
+5、 ceph osd  rm 1
+ 
+ 
+ 
+
+重新部署：
+
+ceph-deploy uninstall 
+ceph-deploy purge cephnode0   cephnode2 cephnode3 cephnode4 cephnode5
+ceph-deploy purgedata cephnode0 cephnode1 cephnode2
+
+ceph-deploy forgetkeys
+
+
+
+报错处理：
+#############################################
+[ceph@cephnode0 cluster]$ ceph -w
+2017-03-24 18:58:29.832395 7fb5d6222700 -1 auth: unable to find a keyring on /etc/ceph/ceph.client.admin.keyring,/etc/ceph/ceph.keyring,/etc/ceph/keyring,/etc/ceph/keyring.bin: (2) No such file or directory
+2017-03-24 18:58:29.832414 7fb5d6222700 -1 monclient(hunting): ERROR: missing keyring, cannot use cephx for authentication
+2017-03-24 18:58:29.832417 7fb5d6222700  0 librados: client.admin initialization error (2) No such file or directory
+Error connecting to cluster: ObjectNotFound
+[ceph@cephnode0 cluster]$
+
+权限问题，修改为sudo chmod 755 /etc/ceph/ceph.client.admin.keyring
+
+
+
+安装不过去的时候：
+  yum -y install epel-release
+
+
+
+# ** ERROR: osd init failed: (36) File name too long
+
+修改？/etc/ceph/ceph.conf文件，在文件中添加如下配置
+
+osd max object name len = 256  
+osd max object namespace len = 64  
+
+
+
+
+#安装ceph时出错[ceph_deploy][ERROR ] RuntimeError: NoSectionError: No section: 'ceph'，是为什么呢​
+yum remove ceph-release  先执行这个，把这个东西卸了，应该是这个的版本不兼容 亲测有效
+
+
+
+
+################3
+clock skew detected on mon.cephnode3 
+ 在admin结点上，修改ceph.conf，添加：
+mon_clock_drift_allowed = 5
+mon_clock_drift_warn_backoff = 30
+ceph-deploy --overwrite-conf admin ceph1 ceph2 ceph3
+
+ 重启monitor
+systemctl restart ceph-mon@ceph1.service
+
+
+osd进程过多，需要修改ceph用户的最大文件打开数：
+ /etc/security/limits.d/20-nproc.conf  
+
+
+
+
+
+########################
+epel.repo
+[epel]
+name=Extra Packages for Enterprise Linux 7 - $basearch
+#baseurl=http://download.fedoraproject.org/pub/epel/7/$basearch
+mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-7&arch=$basearch
+failovermethod=priority
+enabled=1
+gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+
+[epel-debuginfo]
+name=Extra Packages for Enterprise Linux 7 - $basearch - Debug
+#baseurl=http://download.fedoraproject.org/pub/epel/7/$basearch/debug
+mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-debug-7&arch=$basearch
+failovermethod=priority
+enabled=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+gpgcheck=1
+
+[epel-source]
+name=Extra Packages for Enterprise Linux 7 - $basearch - Source
+#baseurl=http://download.fedoraproject.org/pub/epel/7/SRPMS
+mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-source-7&arch=$basearch
+failovermethod=priority
+enabled=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+gpgcheck=0
+
+#
+当您运行每台主机上运行多个OSD进程时（如>20）会产生很多的线程，特别是进行recovery和relalancing操作。
+许多Linux内核默认线程限最大数量比较小（例如，32k的）。
+如果您遇到这方面的问题，可以考虑把kernel.pid_max设置的高一点。理论上的最大值为4,194,303
+
+
